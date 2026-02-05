@@ -1,6 +1,14 @@
 #include <Wire.h>
+#include <WiFi.h>
+#include <WebServer.h>
 #include <U8g2lib.h>
 #include <Adafruit_BME680.h>
+
+// -------------------- WiFi ---------------------
+const char* WIFI_SSID = "YOUR_SSID";
+const char* WIFI_PASS = "YOUR_PASSWORD";
+
+WebServer server(80);
 
 // -------------------- Pins --------------------
 const int OLED_SDA = 20;
@@ -54,6 +62,9 @@ void readBME688();
 float computeVocIndex(float gasResistanceOhms);
 AirQualityState calculateAirQualityState();
 void drawOledScreen(AirQualityState state, bool blinkWarning);
+void handleDataRequest();
+
+String wifiIPAddress = "";
 
 // =================================================
 // setup()
@@ -91,9 +102,42 @@ void setup() {
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_6x12_tf);
   u8g2.drawStr(0, 12, "Garage AQ monitor");
-  u8g2.drawStr(0, 28, "OLED+BME688+PMSA003");
+  u8g2.drawStr(0, 28, "Connecting WiFi...");
   u8g2.sendBuffer();
-  delay(800);
+
+  // WiFi connection
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  Serial.print(F("Connecting to WiFi"));
+
+  unsigned long wifiStart = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 15000) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiIPAddress = WiFi.localIP().toString();
+    Serial.print(F("WiFi connected, IP: "));
+    Serial.println(wifiIPAddress);
+  } else {
+    wifiIPAddress = "No WiFi";
+    Serial.println(F("WiFi connection failed"));
+  }
+
+  // HTTP server
+  server.on("/", handleDataRequest);
+  server.begin();
+  Serial.println(F("HTTP server started"));
+
+  // Show IP on splash
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_6x12_tf);
+  u8g2.drawStr(0, 12, "Garage AQ monitor");
+  u8g2.drawStr(0, 28, wifiIPAddress.c_str());
+  u8g2.sendBuffer();
+  delay(1500);
 }
 
 // =================================================
@@ -134,7 +178,43 @@ void loop() {
     Serial.print(F("%, state=")); Serial.println((int)currentState);
   }
 
+  server.handleClient();
   delay(10);
+}
+
+// =================================================
+// HTTP JSON handler
+// =================================================
+void handleDataRequest() {
+  const char* stateStr;
+  switch (currentState) {
+    case AQ_GOOD:      stateStr = "GOOD";      break;
+    case AQ_MODERATE:  stateStr = "MODERATE";   break;
+    case AQ_WARNING:   stateStr = "WARNING";    break;
+    case AQ_DANGEROUS: stateStr = "DANGEROUS";  break;
+    default:           stateStr = "UNKNOWN";    break;
+  }
+
+  char json[512];
+  snprintf(json, sizeof(json),
+    "{"
+    "\"pm1_0\":%.1f,"
+    "\"pm2_5\":%.1f,"
+    "\"pm10\":%.1f,"
+    "\"temperature\":%.1f,"
+    "\"humidity\":%.1f,"
+    "\"gas_resistance_ohms\":%.0f,"
+    "\"voc_index\":%.0f,"
+    "\"air_quality\":\"%s\","
+    "\"uptime_ms\":%lu"
+    "}",
+    pm1_0, pm2_5, pm10,
+    temperature, humidity, gasOhms,
+    vocIndex, stateStr, millis()
+  );
+
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.send(200, "application/json", json);
 }
 
 // =================================================
